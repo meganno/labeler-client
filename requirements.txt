@@ -1,4 +1,4 @@
-labeler_ui==0.3.12
+labeler_ui==1.0.7
 requests==2.26.0
 urllib3==1.26.6
 importlib-metadata==4.12.0
