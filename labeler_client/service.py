@@ -338,3 +338,23 @@ class Service:
         print("Finished setting metadata {} for {} data records".format(
             meta_name, set_count))
         return
+
+    def get_assignment(self, annotator=None, latest_only=False):
+        '''
+        Get subset assignment for annotator.
+        :param annotator: querying annotator user id, token holder if None
+        '''
+        payload = self.get_base_payload()
+        payload['annotator'] = annotator
+        payload['latest_only'] = latest_only
+        path = self.get_service_endpoint('get_assignment')
+        response = get_request(path, json=payload)
+
+        unique_assignments = set({})
+        if response.status_code == 200:
+            for res in response.json():
+                unique_assignments.update(res['uuid_list'])
+            return Subset(data_uuids=list(unique_assignments), service=self)
+
+        else:
+            raise Exception(response.text)

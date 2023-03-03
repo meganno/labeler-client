@@ -9,6 +9,8 @@ SERVICE_ENDPOINTS = {
     'export_data': '/data/export',
     'get_schemas': '/schemas',
     'set_schemas': '/schemas',
+    'get_assignment': '/assignment',
+    'set_assignment': '/assignment',
     'get_reconciliation_data': '/reconciliations',
     'set_reconciliation_data': '/annotations/{uuid}/labels',
     'get_user': '/users',

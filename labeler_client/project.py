@@ -1,4 +1,3 @@
-from importlib.resources import path
 from labeler_client.constants import DNS_NAME, SERVICE_ENDPOINTS
 from labeler_ui import ProjectManager
 from labeler_client.helpers import get_request, post_request
@@ -7,10 +6,16 @@ import sys
 
 class Project:
 
-    def __init__(self, host=None, token='', auth=None):
+    def __init__(self, project='development', host=None, token='', auth=None):
+        if host is not None:
+            if project is None or len(project) == 0:
+                raise Exception("Project cannot be None or empty.")
         if (token is None or len(token) == 0) and auth is None:
             raise Exception("At least 1 authentication method is required.")
         self.token = token
+        self.project = project
+        if host is None or len(host) == 0:
+            self.project = 'development'
         self.auth = auth
         self.host = host
         self.project_exists = False
@@ -19,8 +24,7 @@ class Project:
         dns_name = DNS_NAME
         if self.host is not None:
             dns_name = self.host
-        return '{}:5000/'.format(
-            dns_name) + 'development' + SERVICE_ENDPOINTS.get(key, '')
+        return f'{dns_name}:5000/{self.project}{SERVICE_ENDPOINTS.get(key, "")}'
 
     def get_variable_name(self, target=None):
         if target is None:

@@ -1,5 +1,5 @@
 from labeler_ui import Annotation
-from labeler_client.helpers import get_request
+from labeler_client.helpers import get_request, post_request
 import json
 
 
@@ -93,5 +93,20 @@ class Subset():
         if response.status_code == 200:
             suggested_uuids = list(set(json.loads(response.text)))
             return Subset(service=self.__service, data_uuids=suggested_uuids)
+        else:
+            raise Exception(response.text)
+
+    def assign(self, annotator):
+        assert annotator is not None, "Need a valid annotator ID for assignment"
+        payload = self.__service.get_base_payload()
+        payload.update({
+            'subset_uuid_list': self.__data_uuids,
+            "annotator": annotator,
+        })
+        path = self.__service.get_service_endpoint('get_assignment')
+
+        response = post_request(path, json=payload)
+        if response.status_code == 200:
+            return response.json()
         else:
             raise Exception(response.text)

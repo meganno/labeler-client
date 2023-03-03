@@ -21,7 +21,7 @@ package = {
     find_packages(),
     "install_requires": [
         'requests==2.26.0', 'urllib3==1.26.6', 'importlib-metadata==4.12.0',
-        'labeler-ui @ git+https://github.com/meganno/labeler-ui.git@v1.1.0'
+        'labeler-ui @ git+https://github.com/rit-git/labeler-ui.git@v1.2.1'
     ],
     "include_package_data":
     True,
