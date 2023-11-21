@@ -1,12 +1,16 @@
+import time
+
 from labeler_client.constants import DNS_NAME, SERVICE_ENDPOINTS
-from labeler_ui import ProjectManager
-from labeler_client.helpers import get_request, post_request
-import sys
+from labeler_client.helpers import (delete_request, get_request, post_request,
+                                    put_request)
 
 
 class Project:
+    """
+    [Megagon-only] Methods for managing multi-project domains; with interfaces to create, list, archieve and restore projects.
+    """
 
-    def __init__(self, project='development', host=None, token='', auth=None):
+    def __init__(self, project='base', host=None, token='', auth=None):
         if host is not None:
             if project is None or len(project) == 0:
                 raise Exception("Project cannot be None or empty.")
@@ -15,7 +19,7 @@ class Project:
         self.token = token
         self.project = project
         if host is None or len(host) == 0:
-            self.project = 'development'
+            self.project = 'base'
         self.auth = auth
         self.host = host
         self.project_exists = False
@@ -25,18 +29,6 @@ class Project:
         if self.host is not None:
             dns_name = self.host
         return f'{dns_name}:5000/{self.project}{SERVICE_ENDPOINTS.get(key, "")}'
-
-    def get_variable_name(self, target=None):
-        if target is None:
-            return None
-        for name, module in sys.modules.items():
-            try:
-                for varname, obj in module.__dict__.items():
-                    if obj is target:
-                        return varname
-            except AttributeError:
-                pass
-        return None
 
     def get_base_payload(self):
         token_type, token = self.__get_token()
@@ -72,21 +64,48 @@ class Project:
         else:
             raise Exception(response.text)
 
-    def get_projects(self):
+    def restore_project(self, id):
         payload = self.get_base_payload()
+        payload.update({'id': id})
+        path = self.get_service_endpoint('restore_project').format(
+            project_id=id)
+        response = put_request(path=path, json=payload)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(response.text)
+
+    def archive_project(self, id):
+        payload = self.get_base_payload()
+        payload.update({'id': id})
+        path = self.get_service_endpoint('archive_project').format(
+            project_id=id)
+        response = delete_request(path=path, json=payload)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(response.text)
+
+    def get_projects(self, archived=False):
+        payload = self.get_base_payload()
+        payload.update({'archived': archived})
         path = self.get_service_endpoint('get_projects')
         response = get_request(path=path, json=payload)
         if response.status_code == 200:
-            result = {}
-            for project in response.json():
-                result[project] = {
-                    'REST_API': f'{DNS_NAME}:5000/{project}?url_check=1'
+            result = response.json()
+            for i in range(len(result)):
+                result[i] = {
+                    **result[i],
+                    'api':
+                    f'{DNS_NAME}:5000/{result[i]["project_name"]}?url_check=1',
                 }
             return result
         else:
             raise Exception(response.text)
 
     def show(self):
-        project_varname = self.get_variable_name(target=self)
-        widget = ProjectManager(project=project_varname)
-        return widget.show()
+        from labeler_ui import ProjectManager
+        current_time = int(time.time())
+        project_ref = f'project_ref_{current_time}'
+        setattr(Project, project_ref, self)
+        return ProjectManager(project=project_ref).show()

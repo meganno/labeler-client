@@ -1,7 +1,9 @@
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
-from labeler_client.constants import NO_TIMEOUT_ENDPOINTS, REQUEST_TIMEOUT_SECONDS
+
+from labeler_client.constants import (NO_TIMEOUT_ENDPOINTS,
+                                      REQUEST_TIMEOUT_SECONDS)
 
 
 def requests_retry_session(
@@ -22,6 +24,32 @@ def requests_retry_session(
     session.mount('http://', adapter)
     session.mount('https://', adapter)
     return session
+
+
+def delete_request(path='', json={}, timeout=REQUEST_TIMEOUT_SECONDS):
+    for endpoint in NO_TIMEOUT_ENDPOINTS.get('get', []):
+        if path.endswith(endpoint):
+            timeout = None
+            break
+    try:
+        return requests_retry_session().delete(path,
+                                               json=json,
+                                               timeout=timeout)
+    except requests.ConnectTimeout as ex:
+        raise Exception('{}: {}'.format(ex.__class__.__name__,
+                                        '408 Request Timeout'))
+
+
+def put_request(path='', json={}, timeout=REQUEST_TIMEOUT_SECONDS):
+    for endpoint in NO_TIMEOUT_ENDPOINTS.get('post', []):
+        if path.endswith(endpoint):
+            timeout = None
+            break
+    try:
+        return requests_retry_session().put(path, json=json, timeout=timeout)
+    except requests.ConnectTimeout as ex:
+        raise Exception('{}: {}'.format(ex.__class__.__name__,
+                                        '408 Request Timeout'))
 
 
 def get_request(path='', json={}, timeout=REQUEST_TIMEOUT_SECONDS):

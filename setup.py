@@ -1,7 +1,8 @@
-from setuptools import setup, find_packages
 from pathlib import Path
 
-version = Path('./labeler_client/version').read_text().strip()
+from setuptools import find_packages, setup
+
+version = Path("./labeler_client/version").read_text().strip()
 package = {
     "name":
     "labeler_client",
@@ -20,12 +21,25 @@ package = {
     "packages":
     find_packages(),
     "install_requires": [
-        'requests==2.26.0', 'urllib3==1.26.6', 'importlib-metadata==4.12.0',
-        'labeler-ui @ git+https://github.com/meganno/labeler-ui.git@v1.1.0'
+        "pandas==1.3.1",
+        "httpx==0.24.1",
+        "nest_asyncio==1.5.1",
+        "websockets==11.0.3",
+        "tqdm==4.62.0",
+        "openai==0.28.1",
+        "jsonschema>=4.18.0",
+        "notebook==6.5.5",
+        "traitlets==5.9.0",
+        "pydash==7.0.6",
+        "tabulate==0.9.0",
     ],
+    "extras_require": {
+        "ui":
+        ["labeler-ui @ git+https://github.com/meganno/labeler-ui.git@llm-v1"]
+    },
     "include_package_data":
     True,
     "zip_safe":
-    False
+    False,
 }
 setup(**package)
