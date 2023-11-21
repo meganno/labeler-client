@@ -35,7 +35,7 @@ package = {
     ],
     "extras_require": {
         "ui":
-        ["labeler-ui @ git+https://github.com/meganno/labeler-ui.git@llm-v1"]
+        ["labeler-ui @ git+https://github.com/meganno/labeler-ui.git@demo-llm-v1"]
     },
     "include_package_data":
     True,
