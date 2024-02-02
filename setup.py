@@ -21,7 +21,7 @@ package = {
     "packages":
     find_packages(),
     "install_requires": [
-        "pandas==1.3.1",
+        "pandas==1.5.3",
         "httpx==0.24.1",
         "nest_asyncio==1.5.1",
         "websockets==11.0.3",
