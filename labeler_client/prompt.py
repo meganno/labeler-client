@@ -35,13 +35,14 @@ class PromptTemplate:
         self.template = template
 
         self.task_inst = kwargs.get(
-            "task_inst",
-            "Label the {name} of the following text as {options}.")
+            "task_inst", "Label the {name} of the following text as {options}."
+        )
         self.is_json_template = kwargs.get("is_json_template", False)
         format_inst = (
             "Your answer should be in a valid JSON format and ensure you include both opening and closing braces and quotations for the property fields in all cases as {format_sample}."
-            if self.is_json_template else
-            "Your answer should be in the following format '{format_sample}'.")
+            if self.is_json_template
+            else "Your answer should be in the following format '{format_sample}'."
+        )
         self.format_inst = kwargs.get("format_inst", format_inst)
 
     def set_schema(self, label_schema, label_names):
@@ -58,7 +59,8 @@ class PromptTemplate:
         if label_names:
             valid_label_names = {label["name"] for label in label_schema}
             label_names = [
-                label_name for label_name in label_names
+                label_name
+                for label_name in label_names
                 if label_name in valid_label_names
             ]
         if not label_names or len(label_names) == 0:
@@ -67,7 +69,8 @@ class PromptTemplate:
         self.label_names = label_names
         self.label_dic = {
             label["name"]: [o["text"] for o in label["options"]]
-            for label in label_schema if label["name"] in label_names
+            for label in label_schema
+            if label["name"] in label_names
         }
 
     def set_instruction(self, **kwargs):
@@ -75,8 +78,7 @@ class PromptTemplate:
         Updates template's task instruction and/or formatting instruction.
         """
         self.task_inst = kwargs.get("task_inst", self.task_inst)
-        self.is_json_template = kwargs.get("is_json_template",
-                                           self.is_json_template)
+        self.is_json_template = kwargs.get("is_json_template", self.is_json_template)
         self.format_inst = kwargs.get("format_inst", self.format_inst)
 
     def build_template(self, task_inst, format_inst, f=lambda x: x):
@@ -99,25 +101,36 @@ class PromptTemplate:
             Stringified prompt template with input slot
         """
         # task_inst -> instruction
-        instruction = " ".join([
-            task_inst.format(name=f(l),
-                             options=f(comma_join_list(self.label_dic[l])))
-            for l in self.label_names
-        ])
+        instruction = " ".join(
+            [
+                task_inst.format(
+                    name=f(l), options=f(comma_join_list(self.label_dic[l]))
+                )
+                for l in self.label_names
+            ]
+        )
 
         # format_inst -> formatting
         if self.is_json_template == False:  # format 1 // <label name>: <option>
             format_slot = "{name}: {option}"
-            format_sample = "\n".join([
-                format_slot.format(name=l.capitalize(), option="<" + l + ">")
-                for l in self.label_names
-            ])
+            format_sample = "\n".join(
+                [
+                    format_slot.format(name=l.capitalize(), option="<" + l + ">")
+                    for l in self.label_names
+                ]
+            )
         else:  # format 2 // json
             format_slot = '"{name}": "{option}"'
-            format_sample = ("{" + ", ".join([
-                format_slot.format(name=l.capitalize(), option="<" + l + ">")
-                for l in self.label_names
-            ]) + "}")
+            format_sample = (
+                "{"
+                + ", ".join(
+                    [
+                        format_slot.format(name=l.capitalize(), option="<" + l + ">")
+                        for l in self.label_names
+                    ]
+                )
+                + "}"
+            )
         formatting = format_inst.format(format_sample=f(format_sample))
 
         input_slot = "Text: '''\n$input\n'''"
@@ -132,9 +145,9 @@ class PromptTemplate:
         Updates template by updating task instruction and/or formatting instruction.
         """
         self.set_instruction(**kwargs)
-        self.template = self.build_template(task_inst=self.task_inst,
-                                            format_inst=self.format_inst,
-                                            f=lambda x: x)
+        self.template = self.build_template(
+            task_inst=self.task_inst, format_inst=self.format_inst, f=lambda x: x
+        )
         # print("Prompt template saved")
 
     def get_template(self):
@@ -185,8 +198,7 @@ class PromptTemplate:
 
         task_inst = Textarea(
             value=self.task_inst,
-            placeholder=
-            "Type task instruction. It should include {name} and {options}.",
+            placeholder="Type task instruction. It should include {name} and {options}.",
             description="Task Inst:",
             disabled=False,
             layout=Layout(height="auto", width="auto"),
@@ -194,8 +206,7 @@ class PromptTemplate:
 
         format_inst = Textarea(
             value=self.format_inst,
-            placeholder=
-            "Type formatting instruction. It should include {format_sample}.",
+            placeholder="Type formatting instruction. It should include {format_sample}.",
             description="Formatting:",
             disabled=True,
             layout=Layout(height="auto", width="auto"),
@@ -226,24 +237,24 @@ class PromptTemplate:
         output.append_stdout(
             self.get_prompt(
                 input_str=input_list.value,
-                template=self.build_template(task_inst=task_inst.value,
-                                             format_inst=format_inst.value,
-                                             f=color),
-            ))
+                template=self.build_template(
+                    task_inst=task_inst.value, format_inst=format_inst.value, f=color
+                ),
+            )
+        )
 
         @output.capture(clear_output=True)
         def handle_change(btn):
             prompt = self.get_prompt(
                 input_str=input_list.value,
-                template=self.build_template(task_inst=task_inst.value,
-                                             format_inst=format_inst.value,
-                                             f=color),
+                template=self.build_template(
+                    task_inst=task_inst.value, format_inst=format_inst.value, f=color
+                ),
             )
             print(prompt)
 
         def set_prompt(btn):
-            self.set_template(task_inst=task_inst.value,
-                              format_inst=format_inst.value)
+            self.set_template(task_inst=task_inst.value, format_inst=format_inst.value)
 
         # task_inst.observe(handle_change, names=['value'])
         # input_list.observe(handle_change, names=['value'])
@@ -251,11 +262,14 @@ class PromptTemplate:
         btn_save.on_click(set_prompt)
 
         display(
-            VBox([
-                task_inst,
-                format_inst,
-                input_list,
-                HBox([btn_refresh, btn_save]),
-                output_desc,
-                output,
-            ]))
+            VBox(
+                [
+                    task_inst,
+                    format_inst,
+                    input_list,
+                    HBox([btn_refresh, btn_save]),
+                    output_desc,
+                    output,
+                ]
+            )
+        )

@@ -1,5 +1,8 @@
 import json
 import time
+from re import S
+
+import pydash
 
 from labeler_client.helpers import get_request, post_request
 
@@ -14,19 +17,13 @@ class Subset:
         List of unique identifiers of data records in the subset.
     __service : Service
         Connected backend service
-    __annotation_list : list
-        Local cache of retrieved data and annotation information for
-        records in the subset.
-    __meta_names : list
-        List of metadata names. Metadata records additional information
-        about data records, like document length or sentence embedding vectors.
-
+    __my_annotation_list : list
+        Local cache of the record and annotation view of the subset owned by
+        service.annotator_id. with all possible metadata.
 
     """
 
-    def __init__(
-        self, service, data_uuids=[], meta_names=[], job_id=None, annotator_id=None
-    ):
+    def __init__(self, service, data_uuids=[], job_id=None):
         """
         Init function
 
@@ -37,20 +34,22 @@ class Subset:
             backend service and corresponding data storage
         data_uuids : list
             List of data uuid's to be included in the subset
-        meta_names : list
-            Optional list of meta names. If specified, the client
-            can retrieve the corresponding metadata (e.g., document length, embeddings)
-            for each data record.
-            <tmp : we should give an example of meta names>
         """
         self.__data_uuids = data_uuids
         self.__service = service
-        self.__meta_names = meta_names
+        # TODO: to be removed after UI changes
+        # in verifcation UI, instead of calling value() for subset owned
+        # by job_id, on subset owned by user, call value(annotator_list =[job_id])
         self.job_id = job_id
-        self.annotator_id = annotator_id
-        self.__annotation_list = self.__get_annotation_list()
+        if job_id is None:
+            self.annotator_id = service.get_annotator()["user_id"]
+        else:
+            self.annotator_id = job_id
+        self.__my_annotation_list = self.__get_annotation_list(
+            annotator_list=[self.annotator_id]
+        )
 
-    def get_annotator_id(self):
+    def __get_annotator_id(self):
         if self.job_id is not None:
             return self.job_id
         return self.annotator_id
@@ -62,10 +61,13 @@ class Subset:
         annotator: str = None,
         verifiers: list = None,
         verified_status: str = None,
-    ):
-        if label_name is None or len(label_name) == 0:
+    ): 
+        # signature names to be changed
+        # verifiers --> verifier_filter
+        # verified_status --> status_filter
+        if pydash.is_empty(label_name):
             raise Exception("label_name cannot be None or empty.")
-        if label_level is None or len(label_level) == 0:
+        if pydash.is_empty(label_level):
             raise Exception("label_level cannot be None or empty.")
         payload = self.__service.get_base_payload()
         payload.update(
@@ -74,11 +76,11 @@ class Subset:
                 "label_name": label_name,
                 "label_level": label_level,
                 "annotator": annotator,
-                "verifiers": verifiers,
-                "verified_status": verified_status,
+                "verifier_filter": verifiers,
+                "status_filter": verified_status,
             }
         )
-        path = self.__service.get_service_endpoint("get_verification_annotations")
+        path = self.__service.get_service_endpoint("get_view_verification")
         response = get_request(path, json=payload)
         if response.status_code == 200:
             return response.json()
@@ -96,10 +98,16 @@ class Subset:
         """
         return self.__data_uuids
 
-    def __get_annotation_list(self):
+    def __get_annotation_list(self, annotator_list: list = None):
         """
-        Returns all annotation list for all data records in the subset
+        Internal function, used by UI only.
+        Returns all annotation list for all data records in the subset.
 
+
+        Parameters
+        ------
+        annotator_list: list
+            If None, only return data and annotation by all annotators
         Returns
         ------
         subset_annotation_list : list
@@ -118,37 +126,119 @@ class Subset:
             --8<-- "docs/assets/code/annotation_list.json"
             ```
         """
+
         payload = self.__service.get_base_payload()
+        update_cache = (
+            True
+            if len(annotator_list) == 1 and annotator_list[0] == self.annotator_id
+            else False
+        )
         payload.update(
-            {
-                "uuid_list": self.__data_uuids,
-                "meta_names": self.__meta_names,
-                "annotator_id": self.get_annotator_id(),
-            }
+            {"uuid_list": self.__data_uuids, "annotator_list": annotator_list}
         )
         path = self.__service.get_service_endpoint("get_annotations")
         response = get_request(path, json=payload)
         if response.status_code == 200:
-            self.__annotation_list = response.json()
-            return self.__annotation_list
+            ret = response.json()
+            if update_cache:
+                self.__my_annotation_list = ret
+            return ret
         else:
             raise Exception(response.text)
 
-    def value(self):
+    def value(self, annotator_list: list = None):
         """
-        Check for cached annotations
+        Check for cached data and annotations of service owner,
+        or retrieve for other annotators (not cached).
+        Parameters
+        ----------
+        annotator_list : list
+            if None, retrieve cached own annotator.
+            else, fetch live annotation from others.
         Returns
         -------
         subset_annotation_list : list
-            See `get_annotation_list` for description and example.
+            See `__get_annotation_list` for description and example.
         """
-        return self.__annotation_list
 
-    def get_data_content(self):
-        """
-        Get the raw data content for all records in the subset
-        """
-        return self.__service.get_data_content(uuid_list=self.__data_uuids)
+        # TODO: default value None should return for all annotators
+        # To retrieve own annotations. passin own id.
+        # leave unchanged untile UI changes.
+        if annotator_list is None:
+            return self.__my_annotation_list
+        else:
+            return self.__get_annotation_list(annotator_list=annotator_list)
+
+    def get_view_record(
+        self,
+        record_id=None,
+        record_content=None,
+        record_meta_names=None,
+    ):
+        payload = self.__service.get_base_payload()
+        payload.update({"uuid_list": self.__data_uuids})
+        if record_id:
+            payload.update({"record_id": record_id})
+        if record_content:
+            payload.update({"record_content": record_content})
+        if record_meta_names:
+            payload.update({"record_meta_names": record_meta_names})
+        path = self.__service.get_service_endpoint("get_view_record")
+        response = get_request(path, json=payload)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(response.text)
+
+    def get_view_annotation(
+        self,
+        annotator_list=None,
+        label_names=None,
+        label_meta_names=None,
+    ):
+        payload = self.__service.get_base_payload()
+        payload.update({"uuid_list": self.__data_uuids})
+        if annotator_list is not None:
+            payload.update({"annotator_list": annotator_list})
+        if label_names is not None:
+            payload.update({"label_names": label_names})
+        if label_meta_names is not None:
+            payload.update({"label_meta_names": label_meta_names})
+        path = self.__service.get_service_endpoint("get_view_annotation")
+        response = get_request(path, json=payload)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(response.text)
+
+    def get_view_verification(
+        self,
+        label_name=None,
+        label_level=None,
+        annotator=None,
+        verifier_filter=None,
+        status_filter=None,
+    ):
+        # TODO: replace get_verification_annotations
+        payload = self.__service.get_base_payload()
+        payload.update({"uuid_list": self.__data_uuids})
+        if label_name is not None:
+            payload.update({"label_name": label_name})
+        if label_level is not None:
+            payload.update({"label_level": label_level})
+        if annotator is not None:
+            payload.update({"annotator": annotator})
+        if verifier_filter is not None:
+            payload.update({"verifier_filter": verifier_filter})
+        if status_filter is not None:
+            payload.update({"status_filter": status_filter})
+
+        path = self.__service.get_service_endpoint("get_view_verification")
+        response = get_request(path, json=payload)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(response.text)
 
     def get_annotation_by_uuid(self, uuid):
         """
@@ -164,7 +254,7 @@ class Subset:
         annotation : dict
             Annotation for specified data record if it exists else None
         """
-        for annotation in self.__annotation_list:
+        for annotation in self.__my_annotation_list:
             if annotation["uuid"] == uuid:
                 return annotation
         return None
@@ -195,6 +285,7 @@ class Subset:
         subset_ref = "subset_ref_{}".format(current_time)
         service_ref = "service_ref_{}".format(current_time)
         # Set class variables
+        config.update({"verifier_id": self.__get_annotator_id()})
         setattr(Subset, subset_ref, self)
         setattr(Subset, service_ref, self.__service)
         return Annotation(subset=subset_ref, service=service_ref, config=config).show()
@@ -232,17 +323,17 @@ class Subset:
         labels : dict
             Updated labels for uuid annotated by user
         """
-        annotator_user_id = self.__service.get_annotator()["user_id"]
-        if uuid is None:
+        annotator_user_id = self.annotator_id
+        if pydash.is_empty(uuid):
             raise Exception("UUID can not be None.")
-        elif labels is None:
+        elif pydash.is_empty(labels):
             raise Exception(
                 f"Labels can not be None. For clearing annotations, use {{}}."
             )
         labels["annotator"] = annotator_user_id
         added = False
         index = -1
-        for datapoint_idx, datapoint in enumerate(self.__annotation_list):
+        for datapoint_idx, datapoint in enumerate(self.__my_annotation_list):
             if datapoint["uuid"] == uuid:
                 index = datapoint_idx
                 for annotation_idx, annotation in enumerate(
@@ -250,21 +341,22 @@ class Subset:
                 ):
                     if annotation["annotator"] == annotator_user_id:
                         added = True
-                        self.__annotation_list[datapoint_idx]["annotation_list"][
+                        self.__my_annotation_list[datapoint_idx]["annotation_list"][
                             annotation_idx
                         ] = labels
-        if not added and index != -1 and index < len(self.__annotation_list):
-            self.__annotation_list[index]["annotation_list"].append(labels)
+        if not added and index != -1 and index < len(self.__my_annotation_list):
+            self.__my_annotation_list[index]["annotation_list"].append(labels)
         return labels
 
-    def get_reconciliation_data(self, uuid_list=[]):
+    def get_reconciliation_data(self, uuid_list=None):
         """Returns the list of reconciliation data for all data entries specified by user.
         The reconciliation data for one data record consists of the annotations for it by all annotators
 
         Parameters
         ----------
         uuid_list : list
-            list of uuid's provided by user
+            list of uuid's provided by user.
+            If None, use all records in the subset
 
         Returns
         -------
@@ -275,8 +367,8 @@ class Subset:
             --8<-- "docs/assets/code/reconciliation_data.json"
             ```
         """
-        for annotation in self.__annotation_list:
-            uuid_list.append(annotation["uuid"])
+        if uuid_list is None:
+            uuid_list = self.__data_uuids
         return self.__service.get_reconciliation_data(uuid_list=uuid_list)
 
     def suggest_similar(self, meta_name, limit=3):
@@ -320,7 +412,7 @@ class Subset:
         annotator : str
             Annotator ID.
         """
-        if annotator is None or len(annotator) == 0:
+        if pydash.is_empty(annotator):
             raise Exception("Annotator cannot be None or empty.")
         payload = self.__service.get_base_payload()
         payload.update(

@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import json
 import math
 import time
@@ -7,8 +6,10 @@ import warnings
 
 import httpx
 import pandas as pd
+import pydash
 from tqdm import tqdm
 
+from labeler_client.authentication import Authentication
 from labeler_client.constants import (DEFAULT_LIST_LIMIT, DNS_NAME,
                                       HTTPX_LIMITS, REQUEST_TIMEOUT_SECONDS,
                                       SERVICE_ENDPOINTS)
@@ -26,7 +27,7 @@ class Service:
 
     """
 
-    def __init__(self, host=None, project=None, token="", auth=None):
+    def __init__(self, host=None, project=None, token=None, auth=None, port=5000):
         """
         Init function
 
@@ -44,32 +45,38 @@ class Service:
             [Megagon-only] Labeler-ui authentication object.
             Can be skipped if valid token is provided.
         """
-        if project is None or len(project) == 0:
+        if pydash.is_empty(project):
             raise Exception("Project cannot be None or empty.")
-        if (token is None or len(token) == 0) and auth is None:
+        if pydash.is_empty(token) and pydash.is_empty(auth):
             raise Exception("At least 1 authentication method is required.")
         self.project = project
         self.token = token
-        self.auth = auth
+        self.port = port
+        self.auth: Authentication = auth
         self.host = host
         self.user = None
+        self.version = None
         response = get_request(
             path=self.get_service_endpoint() + "?url_check=1", timeout=5
         )
-        if response.status_code != 200:
+        if response.status_code == 200:
+            self.version = pydash.objects.get(response.json(), "version", None)
+        else:
             raise Exception(response.text)
 
-    def show(self):
+    def get_version(self):
+        return self.version
+
+    def show(self, config={}):
         """
         Show project management dashboard in a floating dashboard.
-
         """
         from labeler_ui.widgets.Dashboard import Dashboard
 
         current_time = int(time.time())
         service_ref = f"service_ref_{current_time}"
         setattr(Service, service_ref, self)
-        return Dashboard(service=service_ref).show()
+        return Dashboard(service=service_ref, config=config).show()
 
     def __get_token(self):
         """
@@ -77,13 +84,13 @@ class Service:
         the service object, retrieve corresponding user token.
         """
         try:
-            if self.token is not None and len(self.token) > 0:
-                return ["access_token", self.token]
-            elif self.auth is not None:
-                return ["id_token", self.auth.get_id_token()]
+            if not pydash.is_empty(self.token):
+                return self.token
+            elif not pydash.is_empty(self.auth):
+                return self.auth.get_token()
         except:
-            return ["", ""]
-        return ["", ""]
+            pass
+        return None
 
     def get_service_endpoint(self, key=None):
         """
@@ -102,44 +109,23 @@ class Service:
         if self.host is not None:
             dns_name = self.host
         return (
-            "{}:5000/".format(dns_name) + self.project + SERVICE_ENDPOINTS.get(key, "")
+            f"{dns_name}:{self.port}/" + self.project + SERVICE_ENDPOINTS.get(key, "")
         )
 
     def get_base_payload(self):
         """
         Get the base payload for any REST request which includes the authentication token.
         """
-        token_type, token = self.__get_token()
-        return {token_type: token}
+        return {"token": self.__get_token()}
+
+    def get_project_info(self):
+        return {"id": self.get_service_endpoint(), "project_name": self.project}
 
     def get_schemas(self):
         """
         Get schema object for the connected project.
         """
         return Schema(service=self)
-
-    def get_project_info(self):
-        """
-        Get basic project information like name and descriptions.
-        """
-        path = self.get_service_endpoint("get_project_by_name").format(
-            project_name=self.project
-        )
-        payload = self.get_base_payload()
-        response = get_request(path, json=payload)
-        if response.status_code == 200:
-            return response.json()
-        else:
-            raise Exception(response.text)
-
-    def __parse_id_token(self, token: str) -> dict:
-        parts = token.split(".")
-        if len(parts) != 3:
-            raise Exception("Incorrect ID token format.")
-        payload = parts[1]
-        padded = payload + "=" * (4 - len(payload) % 4)
-        decoded = base64.b64decode(padded)
-        return json.loads(decoded)
 
     def get_statistics(self):
         """
@@ -148,18 +134,18 @@ class Service:
         """
         return Statistic(service=self)
 
-    def get_users_by_uid(self, uid_list: list = []):
+    def get_users_by_uids(self, uids: list = []):
         """
         Get user names by their unique IDs.
         Parameters
         -------
-        uid_list : list
+        uids : list
             list of unique user IDs.
         """
-        if len(uid_list) > 0:
-            path = self.get_service_endpoint("get_users_by_uid")
+        if len(uids) > 0:
+            path = self.get_service_endpoint("get_users_by_uids")
             payload = self.get_base_payload()
-            payload.update({"uid_list": uid_list})
+            payload.update({"uids": uids})
             response = get_request(path, json=payload)
             if response.status_code == 200:
                 return response.json()
@@ -173,144 +159,138 @@ class Service:
         The back-end service distinguishes annotator by the
         token or auth object used to initialize the connection.
         """
-
-        if self.user is None:
-            if self.token is not None and len(self.token) > 0:
+        if pydash.is_empty(self.user):
+            token = self.token
+            if self.auth is not None:
+                token = self.auth.get_token()
+            if not pydash.is_empty(token):
                 path = self.get_service_endpoint("get_user")
                 payload = self.get_base_payload()
-                response = get_request(path, json=payload)
+                response = post_request(path, json=payload)
                 if response.status_code == 200:
                     parsed_result = response.json()
                 else:
                     raise Exception(response.text)
-            elif self.auth is not None:
-                parsed_result = self.__parse_id_token(token=self.auth.get_id_token())
             self.user = {
-                "name": parsed_result.get("name"),
+                "name": parsed_result.get("username"),
                 "user_id": parsed_result.get("user_id"),
             }
         return self.user
 
-    def __get_data(
+    def search(
         self,
-        class_type,
         limit=DEFAULT_LIST_LIMIT,
-        start=0,
+        skip=0,
         uuid_list=None,
-        keyword="",
-        label=None,
-        regex="",
-        meta_names: list = [],
+        keyword=None,
+        regex=None,
+        record_metadata_condition=None,
+        annotator_list=None,
+        label_condition=None,
+        label_metadata_condition=None,
+        verification_condition=None,
     ):
+        """
+        Search the back-end database based on user-provided predicates.
+        Parameters
+        ------
+        limit: int
+            The limit of returned records in the subest.
+        skip: int
+            skip index of returned subset
+            (excluding the first `skip` rows from the raw results ordered by importing order).
+        uuid_list: list
+            list of record uuids to filter on
+        keyword: str
+            Term for exact keyword searches.
+        regex: str
+            Term for regular expression searches.
+        record_metadata_condition: dict
+            {"name": # name of the record-level metadata to filter on
+            "opeartor": "=="|"<"|">"|"<="|">="|"exists",
+            "value": # value to complete the expression}
+        annotator_list: list
+            list of annotator names to filter on
+        label_condition: dict
+            Label condition of the annotation.
+            {"name": # name of the label to filter on
+            "opeartor": "=="|"<"|">"|"<="|">="|"exists"|"conflicts",
+            "value": # value to complete the expression}
+        label_metadata_condition: dict
+            Label metadata condition of the annotation.
+            Note this can be on different labels than label_condition
+            {"label_name": # name of the associated label
+            "name": # name of the label-level metadata to filter on
+            "operator": "=="|"<"|">"|"<="|">="|"exists",
+            "value": # value to complete the expression}
+        verification_condition: dict
+            verification condition of the annotation.
+            {"label_name": # name of the associated label
+             "search_mode":"ALL"|"UNVERIFIED"|"VERIFIED"}
+
+        Returns
+        -------
+        subset : Subset
+            Subset meeting the search conditions.
+        """
         payload = self.get_base_payload()
         filter = {
-            "keyword": keyword,
-            "label": label,
             "limit": limit,
-            "start": start,
-            "uuid_list": uuid_list,
-            "regex": regex,
+            "skip": skip,
         }
+        if keyword is not None:
+            filter["keyword"] = keyword
+        if uuid_list is not None:
+            filter["uuid_list"] = uuid_list
+        if regex is not None:
+            filter["regex"] = regex
+        if record_metadata_condition is not None:
+            filter["record_metadata_condition"] = record_metadata_condition
+        if annotator_list is not None:
+            filter["annotator_list"] = annotator_list
+        if label_condition is not None:
+            filter["label_condition"] = label_condition
+        if label_metadata_condition is not None:
+            filter["label_metadata_condition"] = label_metadata_condition
+        if verification_condition is not None:
+            filter["verification_condition"] = verification_condition
         payload.update(filter)
-        response = get_request(self.get_service_endpoint("get_data"), json=payload)
+        path = self.get_service_endpoint("search")
+        response = get_request(path, json=payload)
         if response.status_code == 200:
-            if class_type == "subset":
-                return Subset(
-                    data_uuids=response.json(),
-                    meta_names=meta_names,
-                    service=self,
-                    annotator_id=self.get_annotator()["user_id"],
-                )
+            return Subset(data_uuids=response.json(), service=self)
         else:
             raise Exception(response.text)
 
     def search_by_job(
         self,
         limit=DEFAULT_LIST_LIMIT,
-        start=0,
-        job_id=None,
-        verified=None,
-    ):
-        payload = self.get_base_payload()
-        verified_status = "ALL"
-        if verified is None:
-            verified_status = "ALL"
-        elif verified is True:
-            verified_status = "VERIFIED"
-        elif verified is False:
-            verified_status = "UNVERIFIED"
-        payload.update(
-            {
-                "verified_status": verified_status,
-                "limit": limit,
-                "start": start,
-                "job_id": job_id,
-            }
-        )
-        response = get_request(
-            self.get_service_endpoint("get_data_by_job").format(job_uuid=job_id),
-            json=payload,
-        )
-        if response.status_code == 200:
-            return Subset(data_uuids=response.json(), service=self, job_id=job_id)
-        else:
-            raise Exception(response.text)
-
-    def search(
-        self,
-        limit=DEFAULT_LIST_LIMIT,
-        start=0,
+        skip=0,
         uuid_list=None,
-        keyword="",
-        label=None,
-        regex="",
-        meta_names: list = [],
+        keyword=None,
+        regex=None,
+        record_metadata_condition=None,
+        job_id=None,
+        label_condition=None,
+        label_metadata_condition=None,
+        verification_condition=None,
     ):
-        """
-        Search the back-end database based on user-provided predicates.
-        Parameters
-        ------
-        limit : int
-            The limit of returned records in the subest.
-        start : int
-            Start index of returned subset
-            (excluding the first `start` rows from the raw results ordered by importing order).
-            Same as SQL skip parameter. TODO: rename to skip (here and in service)
-        keyword : str
-            Term for exact keyword searches.
-        label : object
-            Object containing `label_name` (strig) and list `label_value` (list) fields.
-            Search results will be filtered to only contain records having `label_name` labels
-            with values in the `label_value` list.
-            Example:
-            ```json
-            --8<-- "docs/assets/code/search_label.json"
-            ```
-        regex : str
-            Term for regular expression searches.
-        meta_names : list
-            list of meta_names. If not empty, the returned subset will also retrieve
-            the corresponding metadata.
-
-        Returns
-        -------
-        subset : Subset
-            Subset containing data records (and optionally metadata) meeting the search conditions.
-
-        """
-
-        return self.__get_data(
-            class_type="subset",
+        ret = self.search(
             limit=limit,
-            start=start,
+            skip=skip,
             uuid_list=uuid_list,
             keyword=keyword,
-            label=label,
             regex=regex,
-            meta_names=meta_names,
+            record_metadata_condition=record_metadata_condition,
+            annotator_list=[job_id],
+            label_condition=label_condition,
+            label_metadata_condition=label_metadata_condition,
+            verification_condition=verification_condition,
         )
+        return Subset(data_uuids=ret.get_uuid_list(), service=self, job_id=job_id)
 
-    def submit_annotations(self, subset=None, uuid_list=[]):
+    def deprecate_submit_annotations(self, subset=None, uuid_list=[]):
+        # To be deprecated. Default to submit annotations as a batch
         """
         Submit annotations for records in a subset to the back-end service database.
         Results are filtered to only include annotations owned by the authenticated
@@ -325,7 +305,7 @@ class Service:
             will be submitted.
 
         """
-        if subset is None:
+        if pydash.is_empty(subset):
             raise Exception("Subset can not be None.")
         annotator_user_id = self.get_annotator()["user_id"]
         client = httpx.AsyncClient(limits=HTTPX_LIMITS, timeout=REQUEST_TIMEOUT_SECONDS)
@@ -359,9 +339,62 @@ class Service:
             )
 
         return asyncio.run(main())
+    
+    def submit_annotations(self, subset=None, uuid_list=[]):
+        """
+        Submit annotations for a batch of records in a subset to the back-end service database.
+        Results are filtered to only include annotations owned by the authenticated
+        annotator.
+
+        Parameters
+        -------
+        subset : Subset
+            The subset object containing records and annotations.
+        uuid_list : list
+            Additional filter. Only subset records whose uuid are in this list
+            will be submitted.
+
+        """
+        if pydash.is_empty(subset):
+            raise Exception("Subset can not be None.")
+        payload = self.get_base_payload()
+        annotator_user_id = self.get_annotator()["user_id"]
+        annotation_list = []
+        
+        for uuid in uuid_list:
+            annotation_data = subset.get_annotation_by_uuid(uuid)
+            if annotation_data is not None:
+                own = list(
+                        filter(
+                            lambda annotation: annotation["annotator"] == annotator_user_id,
+                            annotation_data["annotation_list"],
+                        )
+                    )
+                own_annotation = {
+                        "record_uuid": uuid,
+                        "labels": {} if len(own) == 0 else own[0]
+                }
+                annotation_list.append(own_annotation)
+
+        if annotation_list:
+            parameters = {
+                "annotation_list": annotation_list
+            }
+            payload.update(parameters)
+            path = self.get_service_endpoint("submit_annotations_batch")
+            try:
+                response = post_request(path, json=payload)
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    return [{"uuid": uuid, "error": response.text} for uuid in uuid_list]
+            except httpx.TimeoutException:
+                    return [{"uuid": uuid, "error": "408 Request Timeout"} for uuid in uuid_list]
+            except Exception as e:
+                return [{"uuid": uuid, "error": str(e)} for uuid in uuid_list]
 
     def get_reconciliation_data(self, uuid_list=[]):
-        if len(uuid_list) == 0:
+        if pydash.is_empty(uuid_list):
             return []
         BATCH_SIZE = 45
         # making sure the request URL doesn't exceed the 2048 characters limitation for certain browsers
@@ -384,27 +417,6 @@ class Service:
             else:
                 raise Exception(response.text)
         return result
-
-    def get_data_content(self, uuid_list=[]):
-        """
-        Get the raw data content for specified records
-        Parameters
-        -----
-        uuid_list : list[str]
-            List of querying uuids.
-        """
-        payload = self.get_base_payload()
-        payload.update(
-            {
-                "uuid_list": uuid_list,
-            }
-        )
-        path = self.get_service_endpoint("get_data_content")
-        response = get_request(path, json=payload)
-        if response.status_code == 200:
-            return response.json()
-        else:
-            raise Exception(response.text)
 
     def import_data_url(self, url="", file_type=None, column_mapping={}):
         """
@@ -460,7 +472,7 @@ class Service:
         if not isinstance(df, pd.DataFrame):
             raise Exception("df needs to be a valid pandas dataframe")
         filtered_columns = []
-        if len(column_mapping) == 0:
+        if pydash.is_empty(column_mapping):
             # defult mapping ,check for columns "id" and "content"
             if "id" in df.columns and "content" in df.columns:
                 filtered_columns.extend(["id", "content"])
@@ -594,7 +606,7 @@ class Service:
         payload = self.get_base_payload()
         payload.update(
             {
-                "meta_name": meta_name,
+                "record_meta_name": meta_name,
                 "metadata_list": metadata_list,
             }
         )
@@ -633,12 +645,10 @@ class Service:
             total=batch_number, leave=True, desc="Metadata batches processed:"
         ) as tq:
             for i in range(batch_number):
-                s = self.__get_data(
-                    class_type="subset", limit=batch_size, start=i * batch_size
-                )
-                data_batch = self.get_data_content(s.get_uuid_list())
+                s = self.search(limit=batch_size, skip=i * batch_size)
+                data_batch = s.get_view_record()
                 for item in data_batch:
-                    item["value"] = func(item["data"])
+                    item["value"] = func(item["record_content"])
 
                 res = self.__batch_update_metadata(meta_name, data_batch)
                 set_count += int(res)
@@ -670,3 +680,4 @@ class Service:
 
         else:
             raise Exception(response.text)
+

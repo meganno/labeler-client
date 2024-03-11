@@ -7,12 +7,15 @@ from collections import Counter
 from curses.ascii import isdigit
 from string import Template
 
+import jaro
 import jsonschema
 import numpy as np
 import openai
 from tabulate import tabulate
 from tqdm import tqdm
+from tqdm.notebook import tqdm_notebook
 
+from labeler_client.constants import FUZZY_THRESHOLD
 from labeler_client.prompt import PromptTemplate
 from labeler_client.valid_formats import model_config_options
 
@@ -67,6 +70,12 @@ class OpenAIJob:
             if label["name"] in label_names
         }
         self.label_dic = label_dic
+        self.syntax_errors = []
+        self.semantic_errors = []
+        self.label_meta_func_map = {
+            "length": "get_response_length",
+            "conf": "get_openai_conf_score",
+        }
 
     def set_openai_api_key(self, openai_api_key, openai_organization):
         """
@@ -133,14 +142,15 @@ class OpenAIJob:
         return openai_api_key, openai_organization
 
     @staticmethod
-    def validate_model_config(model_config):
-        """
-        Validate the LLM model config provided by user. Model should be among the models allowed on Labeler, and the parameters should match format specified by Open AI
+    def validate_model_config(model_config, api_name="chat"):
+        """Validate the LLM model config provided by user. Model should be among the models allowed on Labeler, and the parameters should match format specified by Open AI
 
         Parameters
         ----------
         model_config : dict
             Model specifications such as model name, other parameters eg. temperature, as provided by user
+        api_name : str
+            Name of OpenAI api eg. "chat" or "completion
 
         Raises
         ------
@@ -152,8 +162,7 @@ class OpenAIJob:
         model_config : dict
             Model congigurations
         """
-        valid_format = model_config_options["completions"]["valid_format"]
-        # validate(model_config, valid_format)
+        valid_format = model_config_options[api_name]["valid_format"]
         validator = jsonschema.Draft7Validator(valid_format)
 
         model_config_errors = validator.iter_errors(
@@ -179,15 +188,12 @@ class OpenAIJob:
             )
 
         for key in model_config:
-            if (
-                key
-                not in model_config_options["completions"]["valid_format"]["properties"]
-            ):
+            if key not in model_config_options[api_name]["valid_format"]["properties"]:
                 print(
                     "Paramater {} is not included in OpenAI Completion API".format(key)
                 )
 
-        if "logprobs" not in model_config:
+        if "logprobs" not in model_config and api_name == "completions":
             model_config["logprobs"] = 0
         return model_config
 
@@ -224,8 +230,7 @@ class OpenAIJob:
         self.invalid_prompts = []
         for record in self.records:
             # append each data record to the template to generate prompt
-            # prompt = Template(template).safe_substitute(input=record["data"])
-            prompt = self.template.get_prompt(input_str=record["data"])
+            prompt = self.template.get_prompt(input_str=record["record_content"])
             if self.is_valid_prompt(prompt):
                 prompts.append((record["uuid"], prompt))
             else:
@@ -237,6 +242,18 @@ class OpenAIJob:
                 self.invalid_prompts.append((record["uuid"], prompt))
         return prompts
 
+    def get_response_length(self):
+        content = self.openai_response.choices[0]["message"]["content"]
+        return len(content)
+
+    def get_openai_conf_score(self):
+        logprobs = []
+        logprobs_response = self.openai_response.choices[0]["logprobs"]["content"]
+        for logprob in logprobs_response:
+            logprobs.append(logprob["logprob"])
+        conf_score = round(np.mean(np.exp(logprobs)), 6)
+        return conf_score
+
     def preprocess(self):
         """
         Generates the list of prompts for each record based on the subset and template
@@ -247,13 +264,6 @@ class OpenAIJob:
             List of prompts
         """
         self.is_json_template = self.template.is_json_template
-        template_str = self.template.get_template()
-        # print(
-        #     "Template for the task:-----------------------------\n{}".format(
-        #         template_str
-        #     )
-        # )
-        # print("-" * 50)
         prompts = self.generate_prompts()
 
         print("\nPre-processing [{}] record(s) :::".format(len(self.records)))
@@ -270,10 +280,11 @@ class OpenAIJob:
             ],
         ]
         print(tabulate(table, headers=["", "Count", "%"], tablefmt="rounded_outline"))
-        # print("\nPrompts:\n{}".format(prompts))
         self.prompts = prompts
 
-    def get_llm_annotations(self, batch_size=1, num_retrials=2):
+    def get_llm_annotations(
+        self, batch_size=1, num_retrials=2, api_name="chat", label_meta_names=[]
+    ):
         """
         Calls OpenAI using the generated prompts, to obtain valid & invalid responses
 
@@ -283,6 +294,10 @@ class OpenAIJob:
             Size of batch to each Open AI prompt
         num_retrials : int
             Number of retrials to OpenAI in case of failure in response
+        api_name : str
+            Name of OpenAI api eg. "chat" or "completion
+        label_meta_names: list
+            list of label metadata names to be set
 
         Returns
         -------
@@ -305,22 +320,49 @@ class OpenAIJob:
         q = queue.Queue()
         start = time.time()
         if batch_size == 1:
-            for i, (uuid, prompt) in tqdm(enumerate(prompts), "Progress"):
+            for i, (uuid, prompt) in tqdm_notebook(enumerate(prompts), "Progress"):
                 time.sleep(1e-10)
                 q.put(num_retrials)
                 while not q.empty():
                     try:
                         trials_left = q.get()
-                        completion = openai.Completion.create(
-                            prompt=prompt, **self.model_config
-                        )
-                        confidence_score = np.mean(
-                            np.exp(
-                                completion["choices"][0]["logprobs"]["token_logprobs"]
+                        if api_name == "completions":
+                            completion = openai.Completion.create(
+                                prompt=prompt, **self.model_config
                             )
-                        )
-                        response = completion["choices"][0]["text"]
-                        responses.append((uuid, response.strip(), confidence_score))
+                            confidence_score = np.mean(
+                                np.exp(
+                                    completion["choices"][0]["logprobs"][
+                                        "token_logprobs"
+                                    ]
+                                )
+                            )
+                            response = completion["choices"][0]["text"]
+                        elif api_name == "chat":
+                            self.model_config["messages"] = [
+                                {
+                                    "role": "user",
+                                    "content": prompt,
+                                },
+                            ]
+                            openai_response = openai.ChatCompletion.create(
+                                **self.model_config
+                            )
+                            self.openai_response = openai_response
+                            metadata_list = []
+                            for label_meta_name in label_meta_names:
+                                func = getattr(
+                                    self, self.label_meta_func_map[label_meta_name]
+                                )
+                                metadata_list.append(
+                                    {
+                                        "metadata_name": label_meta_name,
+                                        "metadata_value": func(),
+                                    }
+                                )
+
+                            response = openai_response.choices[0]["message"]["content"]
+                        responses.append((uuid, response.strip(), metadata_list))
                     except openai.error.AuthenticationError as e:
                         print("--------------------------")
                         print(
@@ -386,8 +428,8 @@ class OpenAIJob:
                     except Exception as e:
                         print("--------------------------")
                         print(
-                            "Encounted an unknown error during call to OpenAI for uuid: {}\n".format(
-                                uuid
+                            "Encounted an unknown error during call to OpenAI for uuid: {} - {}\n".format(
+                                uuid, e
                             )
                         )
                         invalid_responses.append((uuid, e))
@@ -395,7 +437,7 @@ class OpenAIJob:
             prompt_batches = [
                 prompts[i : i + batch_size] for i in range(0, len(prompts), batch_size)
             ]
-            for i, prompt_batch in tqdm(enumerate(prompt_batches), "Progress"):
+            for i, prompt_batch in tqdm_notebook(enumerate(prompt_batches), "Progress"):
                 time.sleep(1e-10)
                 uuids = [uuid for uuid, prompt in prompt_batch]
                 prompts = [prompt for uuid, prompt in prompt_batch]
@@ -403,20 +445,24 @@ class OpenAIJob:
                 while not q.empty():
                     try:
                         trials_left = q.get()
-                        response_batch = openai.Completion.create(
-                            prompt=prompts, **self.model_config
-                        )
-                        for choice in response_batch.choices:
-                            confidence_score = np.mean(
-                                np.exp(choice.logprobs.token_logprobs)
+                        if api_name == "completions":
+                            response_batch = openai.Completion.create(
+                                prompt=prompts, **self.model_config
                             )
-                            responses.append(
-                                (
-                                    uuids[choice.index],
-                                    choice.text.strip(),
-                                    confidence_score,
+                            for choice in response_batch.choices:
+                                confidence_score = np.mean(
+                                    np.exp(choice.logprobs.token_logprobs)
                                 )
-                            )
+                                responses.append(
+                                    (
+                                        uuids[choice.index],
+                                        choice.text.strip(),
+                                        confidence_score,
+                                    )
+                                )
+                        elif api_name == "chat":
+                            # TO BE IMPLEMENTED
+                            pass
                     except openai.error.AuthenticationError as e:
                         print("--------------------------")
                         print(
@@ -490,8 +536,8 @@ class OpenAIJob:
                     except Exception as e:
                         print("--------------------------")
                         print(
-                            "Encounted an unknown error during call to OpenAI for uuid: {}\n".format(
-                                uuid
+                            "Encounted an unknown error during call to OpenAI for uuids: {}\n".format(
+                                uuids, e
                             )
                         )
                         for uuid in uuids:
@@ -517,9 +563,8 @@ class OpenAIJob:
             ],
         ]
         print(tabulate(table, headers=["", "Count", "%"], tablefmt="rounded_outline"))
-        # print("\n\nInvalid responses::\n{}".format(invalid_responses))
 
-    def extract(self, uuid, response):
+    def extract(self, uuid, response, fuzzy_extraction):
         """
         Helper function for post-processing. Extracts the label (name and value) from the OpenAI response
 
@@ -529,6 +574,8 @@ class OpenAIJob:
             Record uuid
         response : str
             Output from OpenAI
+        fuzzy_extraction: bool
+            Set to True if fuzzy extraction desired in post processing
 
         Returns
         -------
@@ -537,6 +584,7 @@ class OpenAIJob:
         """
         # output {'label_name' : 'valid_formatted_response'}
         ret = {}
+
         if self.is_json_template == False:
             # assume only one label in label_dic
             # todo: fix label level should be dependent on parsed label name
@@ -547,33 +595,38 @@ class OpenAIJob:
                 for i in range(0, len(response), 2):
                     label_name = response[i].strip().lower()
                     if i + 1 == len(response):
-                        print(
-                            'For uuid : {}, response generated : "{}" for label name : {} is in invalid format'.format(
-                                uuid, response, label_name
-                            )
-                        )
+                        self.syntax_errors.append((uuid, response))
                         continue
-                    # label_response = response[i + 1].strip().lower()
                     label_response = re.sub(r"[^\w\d\-_+]", "", response[i + 1].lower())
                     if label_name not in self.label_dic:
-                        print(
-                            'For uuid : {}, response generated : "{}" does not have valid label name from the allowed schema options : {}'.format(
-                                uuid, response, self.label_dic.keys()
-                            )
-                        )
+                        self.semantic_errors.append((uuid, response))
                         continue
-                    if label_response not in self.label_dic[label_name]["options"]:
-                        print(
-                            'For uuid : {}, label generated : "{}" for label name : {} is not in valid label options : {}'.format(
-                                uuid,
-                                label_response,
-                                label_name,
-                                self.label_dic[label_name]["options"],
+                    
+                    if fuzzy_extraction == False:
+                        if label_response not in self.label_dic[label_name]["options"]:
+                            self.semantic_errors.append((uuid, response))
+                            self.invalid_option_counter[label_response] += 1
+                            continue
+                        ret[label_name] = label_response
+
+                    else:
+                        max_fuzzy_score = 0
+                        best_label_response = ""
+
+                        for label_option in self.label_dic[label_name]["options"]:
+                            fuzzy_score_jaro = jaro.jaro_winkler_metric(
+                                label_option, label_response
                             )
-                        )
-                        self.invalid_option_counter[label_response] += 1
-                        continue
-                    ret[label_name] = label_response
+                            if fuzzy_score_jaro > max_fuzzy_score:
+                                max_fuzzy_score = fuzzy_score_jaro
+                                best_label_response = label_option
+
+                        if max_fuzzy_score >= FUZZY_THRESHOLD:
+                            ret[label_name] = best_label_response
+                        else:
+                            self.semantic_errors.append((uuid, response))
+                            self.invalid_option_counter[label_response] += 1
+                            continue
             else:
                 response = re.split(":|\n", response)
                 label_name = response[0].strip().lower()
@@ -582,7 +635,7 @@ class OpenAIJob:
                     for record in self.records:
                         if record["uuid"] == uuid:
                             start_idx = (
-                                record["data"]
+                                record["record_content"]
                                 .strip()
                                 .lower()
                                 .find(entity.strip().lower())
@@ -629,9 +682,14 @@ class OpenAIJob:
                     continue
         return ret
 
-    def post_process_annotations(self):
+    def post_process_annotations(self, fuzzy_extraction=False):
         """
         Performs output extraction from the responses generated by LLM, and formats it according to Labeler data model.
+
+        Parameters
+        ----------
+        fuzzy_extraction: bool
+            Set to True if fuzzy extraction desired in post processing
 
         Returns
         -------
@@ -650,15 +708,10 @@ class OpenAIJob:
                     self.label_dic[label_key]["text_to_value"][key]
                 ] = 0
 
-        for uuid, response, confidence_score in responses:
+        for uuid, response, metadata_list in responses:
             # extract, format, validate responses
-            label_responses = self.extract(uuid, response)
+            label_responses = self.extract(uuid, response, fuzzy_extraction)
             if len(label_responses) == 0:
-                print(
-                    "For uuid : {}, response generated : {} was not valid, and hence dropped".format(
-                        uuid, response
-                    )
-                )
                 continue
             self.uuids_with_valid_annotations.append(uuid)
             # assume only one label in label_dic
@@ -672,8 +725,9 @@ class OpenAIJob:
                     label["labels_record"].append(
                         {
                             "label_name": label_name,
+                            "label_level": label_level,
                             "label_value": [label_value],
-                            "confidence_score": round(confidence_score, 5),
+                            "metadata_list": metadata_list,
                         }
                     )
                     self.label_distribution[label_value] += 1
@@ -686,8 +740,8 @@ class OpenAIJob:
                     label["labels_span"].append(
                         {
                             "label_name": label_name,
+                            "label_level": label_level,
                             "label_value": [label_value],
-                            # "confidence_score": round(confidence_score, 5),
                             "start_idx": response["start_idx"],
                             "end_idx": response["end_idx"],
                         }
