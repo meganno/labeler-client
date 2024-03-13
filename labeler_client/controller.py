@@ -1,6 +1,7 @@
 import json
 import os
 
+from labeler_client.constants import VALID_PROVIDERS
 from labeler_client.helpers import get_request, post_request
 from labeler_client.llm_jobs import OpenAIJob
 from labeler_client.prompt import PromptTemplate
@@ -27,7 +28,13 @@ class Controller:
         self.__service = service
         self.__auth = auth
 
-    def list_agents(self, created_by_filter=None):
+    def list_agents(
+        self,
+        created_by_filter=None,
+        provider_filter=None,
+        api_filter=None,
+        show_job_list=False,
+    ):
         """
         Get the list of registered agents by their issuer IDs.
 
@@ -42,7 +49,14 @@ class Controller:
             A list of agents that are created by specified issuers.
         """
         payload = self.__service.get_base_payload()
-        payload.update({"created_by": created_by_filter})
+        payload.update(
+            {
+                "created_by_filter": created_by_filter,
+                "provider_filter": provider_filter,
+                "api_filter": api_filter,
+                "show_job_list": show_job_list,
+            }
+        )
         path = self.__service.get_service_endpoint("get_agents")
         response = get_request(path, json=payload)
         if response.status_code == 200:
@@ -110,7 +124,7 @@ class Controller:
         else:
             raise Exception(response.text)
 
-    def register_agent(self, model_config, prompt_template_str):
+    def register_agent(self, model_config, prompt_template_str, provider_api):
         """
         Registers an agent with backend service.
 
@@ -120,6 +134,8 @@ class Controller:
             Model configuration object
         prompt_template_str : str
             Serialized prompt template
+        provider_api : str
+            Name of provider and corresponding api eg. 'openai:chat'
 
         Returns
         -------
@@ -131,6 +147,7 @@ class Controller:
             {
                 "model_config": model_config,
                 "prompt_template": prompt_template_str,
+                "provider_api": provider_api,
             }
         )
         path = self.__service.get_service_endpoint("register_agent")
@@ -179,7 +196,7 @@ class Controller:
         else:
             raise Exception(response.text)
 
-    def create_agent(self, model_config, prompt_template):
+    def create_agent(self, model_config, prompt_template, provider_api="openai:chat"):
         """
         Validates model configs and registers a new agent.
         Returns new agent's uuid.
@@ -190,6 +207,8 @@ class Controller:
             Model configuration object
         prompt_template : str
             PromptTemplate object
+        provider_api : str
+            Name of provider and corresponding api eg. 'openai:chat'
 
         Returns
         -------
@@ -197,17 +216,24 @@ class Controller:
             Agent uuid
         """
         # validate configs
-        model_config = OpenAIJob.validate_model_config(model_config)
-
-        # calls register_agent (with model_config, template to serializer)
+        api_provider, api_name = provider_api.split(":")
+        if (
+            api_provider not in VALID_PROVIDERS
+            or api_name not in VALID_PROVIDERS[api_provider]
+        ):
+            raise Exception("LLM not supported")
+        if api_provider == "openai":
+            model_config = OpenAIJob.validate_model_config(model_config, api_name)
+        # calls register_agent (with model_config, template, provider_api to serializer)
         agent = self.register_agent(
-            model_config, prompt_template.get_template()
+            model_config, prompt_template.get_template(), provider_api
         )  # service endpoint
         agent_uuid = agent["agent_uuid"]
 
         print("Agent registered :::")
         print("\nAgent ID: {}".format(agent_uuid))
         print("\nModel config: {}".format(model_config))
+        print("\nAPI Provider: {}".format(provider_api))
         print("\nPrompt template: ")
         print("\033[34m{}\x1b[0m".format(prompt_template.get_template()))
         return agent_uuid
@@ -228,12 +254,13 @@ class Controller:
         """
         agents = self.list_my_agents()
         for a in agents:
-            if a[0] == agent_uuid:
+            if a["uuid"] == agent_uuid:
                 return {
-                    "agent_uuid": a[0],
-                    "model_config": json.loads(a[1]),
-                    "prompt_template": a[2],
-                    "created_by": a[3],
+                    "agent_uuid": a["uuid"],
+                    "model_config": json.loads(a["model_config"]),
+                    "prompt_template": a["prompt_template"],
+                    "provider_api": a["provider_api"],
+                    "created_by": a["created_by"],
                 }
         return None
 
@@ -272,7 +299,16 @@ class Controller:
         )  # service endpoint
         return jobs
 
-    def run_job(self, agent_uuid, subset, label_name):
+    def run_job(
+        self,
+        agent_uuid,
+        subset,
+        label_name,
+        batch_size=1,
+        num_retrials=2,
+        label_meta_names=[],
+        fuzzy_extraction=False,
+    ):
         """
         Creates, runs, and persists an LLM annotation job with given agent and subset.
 
@@ -284,7 +320,14 @@ class Controller:
             [Megagon-only] Labeler Subset object to be annotated in the job
         label_name : str
             Label name used for annotation
-
+        batch_size : int
+            Size of batch to each Open AI prompt
+        num_retrials : int
+            Number of retrials to OpenAI in case of failure in response
+        label_meta_names: list
+            list of label metadata names to be set
+        fuzzy_extraction: bool
+            Set to True if fuzzy extraction desired in post processing
         Returns
         -------
         job_uuid : str
@@ -298,7 +341,7 @@ class Controller:
         label_schema = self.__service.get_schemas().value(active=True)[0]["schemas"][
             "label_schema"
         ]
-        records = subset.get_data_content()
+        records = subset.get_view_record()
 
         agent = self.get_agent_by_uuid(agent_uuid)
         if not agent:
@@ -309,6 +352,7 @@ class Controller:
             label_names=[label_name],
             template=agent["prompt_template"],
         )  # todo: read is_json_template
+        provider_api = agent["provider_api"]
 
         print("Job issued :::")
         print("\nAgent ID: {}".format(agent_uuid))
@@ -326,30 +370,44 @@ class Controller:
         )
 
         # create job class instance
-        llm_job = OpenAIJob(
-            label_schema, label_name, records, model_config, prompt_template
-        )
-        llm_job.validate_openai_api_key(openai_api_key, openai_organization)
-        llm_job.preprocess()
-        llm_job.get_llm_annotations()
-        llm_job.post_process_annotations()
+        api_provider, api_name = provider_api.split(":")
+        if (
+            api_provider in VALID_PROVIDERS
+            and api_name in VALID_PROVIDERS[api_provider]
+        ):
+            if api_provider == "openai":
+                if "conf" in label_meta_names:
+                    model_config["logprobs"] = True
+                llm_job = OpenAIJob(
+                    label_schema, label_name, records, model_config, prompt_template
+                )
+                llm_job.validate_openai_api_key(openai_api_key, openai_organization)
+                llm_job.preprocess()
+                llm_job.get_llm_annotations(
+                    batch_size=batch_size,
+                    num_retrials=num_retrials,
+                    api_name=api_name,
+                    label_meta_names=label_meta_names,
+                )
+                llm_job.post_process_annotations(fuzzy_extraction=fuzzy_extraction)
 
         # create job token and service
         job_auth = self.__auth.create_access_token(job=True)
-        job_uuid, job_token = job_auth["uid"], job_auth["token"]
+        job_uuid, job_token = job_auth["user_id"], job_auth["token"]
         job_service = Service(
-            project=self.__service.project, host=self.__service.host, token=job_token
+            project=self.__service.project,
+            host=self.__service.host,
+            port=self.__service.port,
+            token=job_token,
         )
 
         # set annotations and labels for job
-        job_subset = Subset(job_service, subset.get_uuid_list())
+        job_subset = Subset(job_service, subset.get_uuid_list(), job_id=job_uuid)
         for uuid, annotation in llm_job.annotations:
             job_subset.set_annotations(uuid, annotation)
         ret = job_service.submit_annotations(
             job_subset, llm_job.uuids_with_valid_annotations
         )
-        # print("--------------------")
-        # print(ret)
         annotation_uuid_list = [r["annotation_uuid"] for r in ret]
 
         # set job
