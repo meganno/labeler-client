@@ -61,7 +61,7 @@ class Subset:
         annotator: str = None,
         verifiers: list = None,
         verified_status: str = None,
-    ): 
+    ):
         # signature names to be changed
         # verifiers --> verifier_filter
         # verified_status --> status_filter
@@ -285,7 +285,7 @@ class Subset:
         subset_ref = "subset_ref_{}".format(current_time)
         service_ref = "service_ref_{}".format(current_time)
         # Set class variables
-        config.update({"verifier_id": self.__get_annotator_id()})
+        config.update({"verifying_id": self.__get_annotator_id()})
         setattr(Subset, subset_ref, self)
         setattr(Subset, service_ref, self.__service)
         return Annotation(subset=subset_ref, service=service_ref, config=config).show()

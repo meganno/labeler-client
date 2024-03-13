@@ -72,6 +72,24 @@ class Admin:
         else:
             raise Exception(response.text)
 
+    def get_invitation_by_invitation_code(self, invitation_code=None):
+        """
+        Get invitation by invitation code
+
+        Parameters
+        ---------
+        invitation_code : str
+            default to None
+        """
+        payload = self.get_base_payload()
+        response = get_request(
+            path=f"{self.__get_path()}/invitations/{invitation_code}", json=payload
+        )
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(response.text)
+
     def renew_invitation(self, id: str):
         """
         Renew an invitation by id

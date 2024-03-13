@@ -42,5 +42,5 @@ DEFAULT_LIST_LIMIT = 10
 REQUEST_TIMEOUT_SECONDS = 10
 DNS_NAME = "https://labeler.megagon.ai"
 HTTPX_LIMITS = httpx.Limits(max_connections=(9 + 1))
-VALID_PROVIDERS = {"openai": ["chat", "completions"]}
+VALID_PROVIDERS = {"openai": ["chat"]}
 FUZZY_THRESHOLD = 0.6
